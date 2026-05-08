@@ -3,8 +3,9 @@ name = "ai-agent-learning-lab"
 version = "0.1.0"
 description = "Learning lab for OpenAI and Anthropic agent development stacks."
 requires-python = ">=3.11"
-dependencies = []
+dependencies = [
+    "openai",
+]
 
 [tool.ruff]
 line-length = 100
-
