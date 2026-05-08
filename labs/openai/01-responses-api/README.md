@@ -45,7 +45,31 @@ client.responses.create(previous_response_id=..., input=[function_call_output])
 模型输出结构化 JSON
 ```
 
+同一件事画成图：
+
+```mermaid
+flowchart TD
+    A[用户输入订单号] --> B[第一次 Responses API 请求]
+    B --> C{模型是否需要工具}
+    C -->|需要| D[response.output 出现 function_call]
+    D --> E[应用代码读取 name 和 arguments]
+    E --> F[本地执行 get_order_status]
+    F --> G[把结果包装成 function_call_output]
+    G --> H[第二次 Responses API 请求]
+    H --> I[模型输出结构化 JSON]
+    C -->|不需要| J[模型直接输出回答]
+```
+
 这里的重点是：模型不会替你执行函数。模型只返回“我要调用哪个工具、参数是什么”。真正执行工具的是你的应用代码。
+
+最容易混淆的是这两层：
+
+| 层次 | 谁负责 | 在代码里看哪里 |
+| --- | --- | --- |
+| 工具调用参数 | 模型负责生成，但受工具 JSON schema 约束 | `function_call.arguments` |
+| 工具真实执行 | 应用代码负责，模型不能直接碰数据库或本地函数 | `get_order_status(order_id)` |
+| 工具结果回传 | 应用代码负责，必须带上 `call_id` | `function_call_output` |
+| 最终 JSON 回答 | 模型负责生成，但受 `text.format` 约束 | `final_answer` |
 
 ## 依赖
 

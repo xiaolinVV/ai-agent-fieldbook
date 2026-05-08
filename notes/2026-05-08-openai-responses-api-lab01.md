@@ -32,6 +32,25 @@
   -> 模型输出结构化 JSON
 ```
 
+流程图：
+
+```mermaid
+sequenceDiagram
+    participant User as 用户
+    participant App as 应用代码
+    participant Model as Responses API
+    participant Tool as 本地工具
+
+    User->>App: 查询 ORDER-1001
+    App->>Model: 发送用户问题和工具定义
+    Model-->>App: 返回 function_call
+    App->>Tool: 执行 get_order_status(order_id)
+    Tool-->>App: 返回订单状态
+    App->>Model: 回传 function_call_output
+    Model-->>App: 返回结构化 JSON
+    App-->>User: 展示最终结果
+```
+
 本地工具验证命令：
 
 ```bash
@@ -46,6 +65,8 @@ uv run python labs/openai/01-responses-api/order_status_cli.py ORDER-1001 --show
 
 ## 关键理解
 
+一句话：**模型负责判断要不要查，应用代码负责真的去查。**
+
 Responses API 里的 function calling 不是模型执行函数。模型只产生一个 `function_call` 输出项，里面有：
 
 - `type`: 输出项类型，工具调用时是 `function_call`
@@ -54,6 +75,15 @@ Responses API 里的 function calling 不是模型执行函数。模型只产生
 - `call_id`: 回传工具结果时必须引用的调用 ID
 
 应用代码必须自己执行本地函数，再用 `function_call_output` 把结果交回模型。
+
+可以把它理解成一张工单：
+
+| 字段 | 像什么 | 作用 |
+| --- | --- | --- |
+| `name` | 工单类型 | 告诉应用代码该执行哪个工具 |
+| `arguments` | 工单内容 | 告诉应用代码工具参数是什么 |
+| `call_id` | 工单编号 | 回传结果时用它对上这次调用 |
+| `function_call_output` | 工单处理结果 | 应用代码把真实执行结果交回模型 |
 
 `previous_response_id` 是状态链路。用它可以让第二次请求接上第一次响应，模型能理解刚才那个 `function_call_output` 是在回答哪个工具调用。
 
