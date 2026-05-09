@@ -183,10 +183,15 @@ def fmt_time(seconds: float) -> str:
 
 
 def load_info(directory: Path) -> dict[str, Any]:
-    info_path = find_first(directory, (".json",))
+    info_path = find_info_json(directory)
     if not info_path:
         return {}
     return json.loads(info_path.read_text(encoding="utf-8", errors="replace"))
+
+
+def find_info_json(directory: Path) -> Path | None:
+    files = sorted(directory.glob("*.info.json"))
+    return files[0] if files else None
 
 
 def extract_urls(text: str) -> list[str]:
@@ -535,7 +540,7 @@ def write_manifest(
     info = load_info(directory)
     video = find_video(directory)
     subtitle = choose_subtitle(directory)
-    info_path = find_first(directory, (".json",))
+    info_path = find_info_json(directory)
     thumbnail = find_first(directory, (".webp", ".jpg", ".png"))
     description_urls = collect_description_urls(info, url)
     comment_urls = collect_comment_urls(comments)

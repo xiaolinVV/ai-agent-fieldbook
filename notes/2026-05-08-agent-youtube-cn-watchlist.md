@@ -27,6 +27,7 @@
 已沉淀：
 
 - [Agent 的概念、原理与构建模式：从零打造一个简化版的 Claude Code](Agent%20的概念、原理与构建模式：从零打造一个简化版的%20Claude%20Code.md)
+- [实战体验OpenAI全新AI应用开发套件 - Responses API与Agents SDK](实战体验OpenAI全新AI应用开发套件%20-%20Responses%20API与Agents%20SDK.md)
 
 | 顺序 | 视频 | 频道 | 适合学什么 | 判断 |
 |---|---|---|---|---|
