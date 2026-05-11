@@ -21,6 +21,19 @@ from typing import Any
 
 
 DEFAULT_MEDIA_ROOT = Path("local-media/youtube")
+DEFAULT_ASR_MODEL_ROOT = Path("local-media/models/whisper.cpp")
+DEFAULT_ASR_MODEL = "base-q5_1"
+WHISPER_MODEL_URLS = {
+    "tiny": "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-tiny.bin",
+    "base": "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-base.bin",
+    "base-q5_1": "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-base-q5_1.bin",
+    "small": "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-small.bin",
+}
+ASR_PROMPT = (
+    "RAG, Retrieval-Augmented Generation, 检索增强生成, 分片, 索引, 向量, "
+    "Embedding, 向量数据库, 召回, 重排, 生成, cosine similarity, vector database, "
+    "knowledge base, LLM, ChatGPT, Claude, DeepSeek"
+)
 JS_RUNTIMES = ("deno", "node", "bun", "qjs", "quickjs")
 QUICKTIME_FORMAT = (
     "bv*[ext=mp4][vcodec^=avc1][height<=1080]+ba[ext=m4a][acodec^=mp4a]"
@@ -47,25 +60,30 @@ def which(name: str) -> str | None:
 
 def preflight() -> int:
     rows = []
-    for name in ("yt-dlp", "ffmpeg", "ffprobe"):
+    for name in ("yt-dlp", "ffmpeg", "ffprobe", "whisper-cli"):
         path = which(name)
         version = "missing"
         if path:
-            arg = "-version" if name.startswith("ff") else "--version"
-            proc = run([path, arg], check=False)
-            version = (proc.stdout or proc.stderr).splitlines()[0]
+            if name == "whisper-cli":
+                version = "installed"
+            else:
+                arg = "-version" if name.startswith("ff") else "--version"
+                proc = run([path, arg], check=False)
+                version = (proc.stdout or proc.stderr).splitlines()[0]
         rows.append((name, path or "missing", version))
 
     js = detect_js_runtime()
     proxy = detect_proxy("auto")
+    default_model = asr_model_path(DEFAULT_ASR_MODEL, None)
 
     print("video-study-assets preflight")
     for name, path, version in rows:
         print(f"- {name}: {path} ({version})")
     print(f"- js runtime: {js[0] if js else 'missing'}")
     print(f"- proxy(auto): {proxy or 'none'}")
+    print(f"- asr model({DEFAULT_ASR_MODEL}): {default_model if default_model.exists() else 'missing'}")
 
-    missing = [name for name, path, _ in rows if path == "missing"]
+    missing = [name for name, path, _ in rows if path == "missing" and name != "whisper-cli"]
     if missing:
         print(f"Missing tools: {', '.join(missing)}", file=sys.stderr)
         return 1
@@ -141,6 +159,18 @@ def find_video(directory: Path) -> Path | None:
     if quicktime:
         return quicktime[0]
     return find_first(directory, (".mp4", ".mkv", ".webm", ".mov"))
+
+
+def caption_tracks_available(info: dict[str, Any]) -> bool:
+    return bool(info.get("subtitles") or info.get("automatic_captions"))
+
+
+def subtitle_source(info: dict[str, Any], subtitle: Path | None) -> str:
+    if not subtitle:
+        return "missing"
+    if caption_tracks_available(info):
+        return "YouTube subtitle or automatic caption"
+    return "local ASR fallback or manually supplied subtitle"
 
 
 def parse_srt(path: Path) -> list[tuple[float, str]]:
@@ -373,6 +403,122 @@ def choose_subtitle(directory: Path) -> Path | None:
     return None
 
 
+def asr_model_path(model_name: str, explicit_path: str | None) -> Path:
+    if explicit_path:
+        return Path(explicit_path)
+    filename = f"ggml-{model_name}.bin"
+    return DEFAULT_ASR_MODEL_ROOT / filename
+
+
+def asr_output_base(directory: Path) -> Path | None:
+    video = find_video(directory)
+    if not video:
+        return None
+    name = video.name
+    for suffix in (".quicktime.mp4", ".mp4", ".mkv", ".webm", ".mov"):
+        if name.endswith(suffix):
+            name = name[: -len(suffix)]
+            break
+    return directory / f"{name}.zh-Hans"
+
+
+def download_asr_model(model_name: str, model_path: Path, proxy: str | None) -> None:
+    url = WHISPER_MODEL_URLS.get(model_name)
+    if not url:
+        known = ", ".join(sorted(WHISPER_MODEL_URLS))
+        raise SystemExit(f"Unknown ASR model '{model_name}'. Known models: {known}")
+
+    model_path.parent.mkdir(parents=True, exist_ok=True)
+    cmd = ["curl", "-L", "--fail", "-C", "-", "-o", str(model_path), url]
+    if proxy:
+        cmd[1:1] = ["--proxy", proxy]
+    run(cmd)
+
+
+def run_asr_fallback(
+    directory: Path,
+    proxy: str | None,
+    force: bool,
+    model_name: str,
+    model_path: Path,
+    download_model: bool,
+    threads: int,
+    processors: int,
+) -> Path | None:
+    if choose_subtitle(directory) and not force:
+        return choose_subtitle(directory)
+
+    video = find_video(directory)
+    output_base = asr_output_base(directory)
+    if not video or not output_base:
+        print("ASR fallback skipped: no local video found.", file=sys.stderr)
+        return None
+
+    if not which("whisper-cli"):
+        print("ASR fallback skipped: whisper-cli is missing.", file=sys.stderr)
+        return None
+
+    if not model_path.exists():
+        if download_model:
+            download_asr_model(model_name, model_path, proxy)
+        else:
+            print(
+                f"ASR fallback skipped: model missing at {model_path}. "
+                "Install/download it or pass --asr-download-model.",
+                file=sys.stderr,
+            )
+            return None
+
+    audio = directory / "audio-16k.wav"
+    if force or not audio.exists():
+        run([
+            "ffmpeg",
+            "-hide_banner",
+            "-loglevel",
+            "error",
+            "-y",
+            "-i",
+            str(video),
+            "-vn",
+            "-ac",
+            "1",
+            "-ar",
+            "16000",
+            "-c:a",
+            "pcm_s16le",
+            str(audio),
+        ])
+
+    run([
+        "whisper-cli",
+        "-m",
+        str(model_path),
+        "-f",
+        str(audio),
+        "-l",
+        "zh",
+        "-t",
+        str(threads),
+        "-p",
+        str(processors),
+        "-bs",
+        "1",
+        "-bo",
+        "1",
+        "-osrt",
+        "-ovtt",
+        "-otxt",
+        "-oj",
+        "-of",
+        str(output_base),
+        "--prompt",
+        ASR_PROMPT,
+    ])
+
+    subtitle = Path(f"{output_base}.srt")
+    return subtitle if subtitle.exists() else None
+
+
 def write_transcripts(directory: Path, info: dict[str, Any]) -> tuple[Path | None, Path | None]:
     subtitle = choose_subtitle(directory)
     if not subtitle:
@@ -564,6 +710,7 @@ def write_manifest(
         f"- upload_date: {upload_date}",
         f"- duration: {info.get('duration_string') or fmt_time(float(info.get('duration') or 0))}",
         f"- proxy: {proxy or 'none'}",
+        f"- subtitle_source: {subtitle_source(info, subtitle)}",
         "",
         "## Local Assets",
         "",
@@ -632,6 +779,18 @@ def capture(args: argparse.Namespace) -> int:
         download(args.url, directory, proxy, args.force_download)
 
     info = load_info(directory)
+    subtitle = choose_subtitle(directory)
+    if args.asr_fallback != "never" and (args.asr_fallback == "force" or not subtitle):
+        run_asr_fallback(
+            directory=directory,
+            proxy=proxy,
+            force=args.asr_fallback == "force",
+            model_name=args.asr_model,
+            model_path=asr_model_path(args.asr_model, args.asr_model_path),
+            download_model=args.asr_download_model,
+            threads=args.asr_threads,
+            processors=args.asr_processors,
+        )
     clean_path, chapter_path = write_transcripts(directory, info)
     contact = extract_frames(directory, info, args.force_frames)
     comments_json = None
@@ -689,6 +848,17 @@ def build_parser() -> argparse.ArgumentParser:
     cap.add_argument("--force-download", action="store_true")
     cap.add_argument("--force-frames", action="store_true")
     cap.add_argument("--force-comments", action="store_true")
+    cap.add_argument(
+        "--asr-fallback",
+        choices=("auto", "never", "force"),
+        default="auto",
+        help="Use whisper.cpp ASR when no subtitle exists; force regenerates ASR subtitles.",
+    )
+    cap.add_argument("--asr-model", default=DEFAULT_ASR_MODEL, choices=sorted(WHISPER_MODEL_URLS))
+    cap.add_argument("--asr-model-path", help="Explicit whisper.cpp ggml model path.")
+    cap.add_argument("--asr-download-model", action="store_true", help="Download the selected ASR model if missing.")
+    cap.add_argument("--asr-threads", type=int, default=2)
+    cap.add_argument("--asr-processors", type=int, default=6)
     cap.set_defaults(func=capture)
 
     return parser

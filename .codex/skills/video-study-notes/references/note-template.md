@@ -20,6 +20,7 @@ Use this structure for generated video notes. Adapt headings to the video, but k
 - 视频：`local-media/youtube/<slug>/<file>.mp4`
 - QuickTime 兼容视频：`local-media/youtube/<slug>/<file>.quicktime.mp4`
 - 字幕：`local-media/youtube/<slug>/<file>.zh-Hans.srt`
+- 字幕说明：<如果是本地 ASR，说明 YouTube 未暴露标准字幕轨道，字幕由 `whisper.cpp` 生成且未逐句人工校对。>
 - 元数据：`local-media/youtube/<slug>/<file>.info.json`
 - 关键画面抽帧：`local-media/youtube/<slug>/frames/`
 - 评论原始数据：`local-media/youtube/<slug>/comments.json`
