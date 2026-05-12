@@ -24,10 +24,11 @@ Use this skill to turn one learning video into durable fieldbook knowledge: loca
 
    - The script saves assets under `local-media/youtube/<slug>/`, which should stay ignored by Git.
    - The script prefers QuickTime-compatible MP4 media: H.264/`avc1` video up to 1080p plus AAC/`mp4a` audio. Do not blindly download AV1/Opus "best" formats unless the user explicitly wants archival quality over macOS compatibility.
-   - If terminal access to YouTube needs a local proxy, the script auto-detects macOS system proxy settings. Override with `--proxy http://127.0.0.1:PORT` or disable with `--proxy none`.
+   - If terminal access to YouTube needs a local proxy, the script reads proxy environment variables on Linux and auto-detects macOS system proxy settings. Override with `--proxy http://127.0.0.1:PORT` or disable with `--proxy none`.
    - Comments are captured by default with `--comments-limit 200`; use `--skip-comments` only when comments are irrelevant or too slow.
    - If assets already exist, use `--skip-download` to regenerate transcripts, comments, manifests, and keyframes without downloading again.
    - If YouTube exposes no standard subtitle track, the script can fall back to local `whisper.cpp` ASR. Default `--asr-fallback auto` only runs when `whisper-cli` and the local model already exist; add `--asr-download-model` on the first run, or use `--asr-fallback never` to forbid ASR.
+   - On Ubuntu/Linux, `whisper-cli` may be installed in PATH or built locally under `local-media/tools/whisper.cpp/`; the helper script detects both. See `references/asr-fallback.md` before assuming a Homebrew-style install exists.
 
      ```bash
      python3 .codex/skills/video-study-notes/scripts/video_study_assets.py capture \

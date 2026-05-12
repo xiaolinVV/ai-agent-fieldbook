@@ -18,10 +18,12 @@ import subprocess
 import sys
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlparse
 
 
 DEFAULT_MEDIA_ROOT = Path("local-media/youtube")
 DEFAULT_ASR_MODEL_ROOT = Path("local-media/models/whisper.cpp")
+DEFAULT_TOOL_ROOT = Path("local-media/tools")
 DEFAULT_ASR_MODEL = "base-q5_1"
 WHISPER_MODEL_URLS = {
     "tiny": "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-tiny.bin",
@@ -35,6 +37,33 @@ ASR_PROMPT = (
     "knowledge base, LLM, ChatGPT, Claude, DeepSeek"
 )
 JS_RUNTIMES = ("deno", "node", "bun", "qjs", "quickjs")
+LOCAL_WHISPER_CLI_PATHS = (
+    DEFAULT_TOOL_ROOT / "whisper.cpp/build/bin/whisper-cli",
+    DEFAULT_TOOL_ROOT / "whisper.cpp/build/bin/main",
+    DEFAULT_TOOL_ROOT / "whisper.cpp/main",
+    DEFAULT_TOOL_ROOT / "whisper.cpp/whisper-cli",
+)
+CODE_HOSTS = (
+    "github.com",
+    "gitlab.com",
+    "gitee.com",
+    "bitbucket.org",
+    "huggingface.co",
+    "sourceforge.net",
+)
+CODE_PATH_HINTS = (
+    "github",
+    "gitlab",
+    "gitee",
+    "repo",
+    "repository",
+    "source-code",
+    "source_code",
+    "code",
+    "源码",
+    "代码",
+    "项目",
+)
 QUICKTIME_FORMAT = (
     "bv*[ext=mp4][vcodec^=avc1][height<=1080]+ba[ext=m4a][acodec^=mp4a]"
     "/b[ext=mp4][vcodec^=avc1][height<=1080]"
@@ -42,8 +71,12 @@ QUICKTIME_FORMAT = (
 )
 
 
-def run(cmd: list[str], check: bool = True) -> subprocess.CompletedProcess[str]:
-    proc = subprocess.run(cmd, capture_output=True, text=True, errors="replace")
+def run(
+    cmd: list[str],
+    check: bool = True,
+    env: dict[str, str] | None = None,
+) -> subprocess.CompletedProcess[str]:
+    proc = subprocess.run(cmd, capture_output=True, text=True, errors="replace", env=env)
     if check and proc.returncode != 0:
         print("$ " + " ".join(cmd), file=sys.stderr)
         if proc.stdout.strip():
@@ -58,19 +91,60 @@ def which(name: str) -> str | None:
     return shutil.which(name)
 
 
+def whisper_cli_path(project_root: Path | str = Path(".")) -> str | None:
+    for name in ("whisper-cli", "whisper.cpp"):
+        path = which(name)
+        if path:
+            return path
+
+    root = Path(project_root)
+    for relative in LOCAL_WHISPER_CLI_PATHS:
+        path = root / relative
+        if path.is_file() and os.access(path, os.X_OK):
+            return str(path)
+    return None
+
+
+def whisper_runtime_env(
+    whisper_cli: str,
+    base_env: dict[str, str] | None = None,
+) -> dict[str, str]:
+    env = dict(base_env or os.environ)
+    path = Path(whisper_cli)
+    if path.parent.name != "bin" or path.parent.parent.name != "build":
+        return env
+
+    build = path.parent.parent
+    lib_dirs = [
+        build / "src",
+        build / "ggml/src",
+    ]
+    existing_dirs = [str(item) for item in lib_dirs if item.is_dir()]
+    if not existing_dirs:
+        return env
+
+    key = "DYLD_LIBRARY_PATH" if sys.platform == "darwin" else "LD_LIBRARY_PATH"
+    current = env.get(key)
+    env[key] = ":".join(existing_dirs + ([current] if current else []))
+    return env
+
+
 def preflight() -> int:
     rows = []
-    for name in ("yt-dlp", "ffmpeg", "ffprobe", "whisper-cli"):
+    for name in ("yt-dlp", "ffmpeg", "ffprobe"):
         path = which(name)
         version = "missing"
         if path:
-            if name == "whisper-cli":
-                version = "installed"
-            else:
-                arg = "-version" if name.startswith("ff") else "--version"
-                proc = run([path, arg], check=False)
-                version = (proc.stdout or proc.stderr).splitlines()[0]
+            arg = "-version" if name.startswith("ff") else "--version"
+            proc = run([path, arg], check=False)
+            version = (proc.stdout or proc.stderr).splitlines()[0]
         rows.append((name, path or "missing", version))
+    whisper_path = whisper_cli_path()
+    whisper_version = "missing"
+    if whisper_path:
+        proc = run([whisper_path, "--help"], check=False, env=whisper_runtime_env(whisper_path))
+        whisper_version = "installed" if proc.returncode == 0 else "not runnable"
+    rows.append(("whisper-cli", whisper_path or "missing", whisper_version))
 
     js = detect_js_runtime()
     proxy = detect_proxy("auto")
@@ -165,9 +239,16 @@ def caption_tracks_available(info: dict[str, Any]) -> bool:
     return bool(info.get("subtitles") or info.get("automatic_captions"))
 
 
+def local_asr_outputs_exist(subtitle: Path) -> bool:
+    base = subtitle.with_suffix("")
+    return Path(f"{base}.txt").exists() and Path(f"{base}.json").exists()
+
+
 def subtitle_source(info: dict[str, Any], subtitle: Path | None) -> str:
     if not subtitle:
         return "missing"
+    if local_asr_outputs_exist(subtitle):
+        return "local ASR fallback or manually supplied subtitle"
     if caption_tracks_available(info):
         return "YouTube subtitle or automatic caption"
     return "local ASR fallback or manually supplied subtitle"
@@ -240,7 +321,7 @@ def extract_urls(text: str) -> list[str]:
 def collect_description_urls(info: dict[str, Any], source_url: str) -> list[str]:
     text = "\n".join(
         str(info.get(key) or "")
-        for key in ("description", "webpage_url", "original_url", "url")
+        for key in ("description", "webpage_url", "original_url")
     )
     urls = extract_urls(text)
     if source_url and source_url not in urls:
@@ -249,27 +330,12 @@ def collect_description_urls(info: dict[str, Any], source_url: str) -> list[str]
 
 
 def is_code_or_project_url(url: str) -> bool:
-    lower = url.lower()
-    hosts = (
-        "github.com",
-        "gitlab.com",
-        "gitee.com",
-        "bitbucket.org",
-        "huggingface.co",
-        "sourceforge.net",
-    )
-    keywords = (
-        "github",
-        "gitlab",
-        "gitee",
-        "repo",
-        "repository",
-        "source",
-        "code",
-        "源码",
-        "项目",
-    )
-    return any(host in lower for host in hosts) or any(keyword in lower for keyword in keywords)
+    parsed = urlparse(url)
+    host = parsed.netloc.lower()
+    path = parsed.path.lower()
+    if any(host == code_host or host.endswith(f".{code_host}") for code_host in CODE_HOSTS):
+        return True
+    return any(hint in path for hint in CODE_PATH_HINTS)
 
 
 def transcript_mentions_code_repo(directory: Path) -> bool:
@@ -454,8 +520,13 @@ def run_asr_fallback(
         print("ASR fallback skipped: no local video found.", file=sys.stderr)
         return None
 
-    if not which("whisper-cli"):
-        print("ASR fallback skipped: whisper-cli is missing.", file=sys.stderr)
+    whisper_cli = whisper_cli_path()
+    if not whisper_cli:
+        print(
+            "ASR fallback skipped: whisper-cli is missing. "
+            "Install whisper.cpp in PATH or build it under local-media/tools/whisper.cpp.",
+            file=sys.stderr,
+        )
         return None
 
     if not model_path.exists():
@@ -490,7 +561,7 @@ def run_asr_fallback(
         ])
 
     run([
-        "whisper-cli",
+        whisper_cli,
         "-m",
         str(model_path),
         "-f",
@@ -513,7 +584,7 @@ def run_asr_fallback(
         str(output_base),
         "--prompt",
         ASR_PROMPT,
-    ])
+    ], env=whisper_runtime_env(whisper_cli))
 
     subtitle = Path(f"{output_base}.srt")
     return subtitle if subtitle.exists() else None
